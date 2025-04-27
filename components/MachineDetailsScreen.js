@@ -14,16 +14,81 @@ const MachineDetailsScreen = ({ route }) => {
     Temperature_C: machine.sensorData?.Temperature_C?.toString() || '',
     Energy_Consumption_kWh: machine.sensorData?.Energy_Consumption_kWh?.toString() || '',
   });
+  const [ws, setWs] = useState(null);
 
-  const API_URL = 'https://cnc-app-backend.azurewebsites.net/api';
+  // Local testing URLs
+  const API_URL = 'http://localhost:3000/api';
+  const WS_URL = 'ws://localhost:3000';
+  // For Azure deployment, uncomment these:
+  //  const API_URL = 'https://cnc-app-backend.azurewebsites.net/api';
+  // const WS_URL = 'wss://cnc-app-backend.azurewebsites.net';
 
   useEffect(() => {
     fetchPrediction();
+    setupWebSocket();
+    return () => {
+      if (ws) ws.close();
+    };
   }, []);
+
+  const setupWebSocket = async () => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      console.log('WebSocket token:', token ? 'present' : 'missing'); // Debug
+      if (!token) {
+        Alert.alert('Error', 'No JWT token found. Please log in.');
+        return;
+      }
+      const websocket = new WebSocket(WS_URL);
+      websocket.onopen = () => {
+        console.log('WebSocket connected');
+        setWs(websocket);
+      };
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('WebSocket message received:', data); // Debug
+          if (data.error) {
+            Alert.alert('Error', data.error);
+            return;
+          }
+          if (data.machine && data.machine._id === machine._id) {
+            const updatedSensorData = data.machine.sensorData;
+            setSensorData({
+              Spindle_Speed_RPM: updatedSensorData.Spindle_Speed_RPM?.toString() || '',
+              Vibration_Level_mm_s: updatedSensorData.Vibration_Level_mm_s?.toString() || '',
+              Tool_Wear_mm: updatedSensorData.Tool_Wear_mm?.toString() || '',
+              Temperature_C: updatedSensorData.Temperature_C?.toString() || '',
+              Energy_Consumption_kWh: updatedSensorData.Energy_Consumption_kWh?.toString() || '',
+            });
+            fetchPrediction();
+          }
+        } catch (error) {
+          console.error('WebSocket message error:', error);
+          Alert.alert('Error', 'Failed to process WebSocket message');
+        }
+      };
+      websocket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        Alert.alert('Error', 'WebSocket connection failed');
+      };
+      websocket.onclose = () => {
+        console.log('WebSocket disconnected');
+        setWs(null);
+      };
+    } catch (error) {
+      console.error('WebSocket setup error:', error);
+      Alert.alert('Error', 'Failed to initialize WebSocket');
+    }
+  };
 
   const fetchPrediction = async () => {
     try {
       const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        Alert.alert('Error', 'No JWT token found. Please log in.');
+        return;
+      }
       const response = await fetch(`${API_URL}/machines/${machine._id}/predict`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -34,6 +99,7 @@ const MachineDetailsScreen = ({ route }) => {
         Alert.alert('Error', data.message);
       }
     } catch (error) {
+      console.error('Fetch prediction error:', error);
       Alert.alert('Error', 'Failed to fetch prediction');
     } finally {
       setLoading(false);
@@ -55,6 +121,11 @@ const MachineDetailsScreen = ({ route }) => {
 
     try {
       const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        Alert.alert('Error', 'No JWT token found. Please log in.');
+        return;
+      }
+      // Update via HTTP
       const response = await fetch(`${API_URL}/machines/${machine._id}`, {
         method: 'PUT',
         headers: {
@@ -66,11 +137,17 @@ const MachineDetailsScreen = ({ route }) => {
       const data = await response.json();
       if (response.ok) {
         Alert.alert('Success', 'Sensor data updated successfully');
-        fetchPrediction(); // Refresh prediction
+        // Send via WebSocket
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          console.log('Sending WebSocket update:', { machineId: machine._id, sensorData: sensorValues }); // Debug
+          ws.send(JSON.stringify({ machineId: machine._id, sensorData: sensorValues, token }));
+        }
+        fetchPrediction();
       } else {
         Alert.alert('Error', data.message);
       }
     } catch (error) {
+      console.error('Update sensor data error:', error);
       Alert.alert('Error', 'Failed to update sensor data');
     }
   };
